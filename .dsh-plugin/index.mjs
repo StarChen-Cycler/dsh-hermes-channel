@@ -24,7 +24,7 @@
  */
 import { execFile, spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -81,12 +81,19 @@ function run(command, args, timeoutMs) {
 
 async function runPipeline(script, args, timeoutMs = 30000) {
   const r = await run(RUNTIME.pythonBin, [path.join(PIPELINE, script), ...args], timeoutMs)
-  if (r.exitCode !== 0) return { error: r.stderr.trim() || r.error || `exit ${r.exitCode}`, exit_code: r.exitCode }
-  try {
-    return JSON.parse(r.stdout)
-  } catch (e) {
-    return { raw: r.stdout, parse_error: String(e) }
+  // Pipeline scripts report structured JSON on stdout even for non-zero exits
+  // (e.g. monitor on an unregistered flag) — prefer the payload when present.
+  if (r.stdout.trim().length > 0) {
+    try {
+      const data = JSON.parse(r.stdout)
+      if (r.exitCode !== 0 && data !== null && typeof data === 'object' && !Array.isArray(data)) data.exit_code = r.exitCode
+      return data
+    } catch (e) {
+      if (r.exitCode === 0) return { raw: r.stdout, parse_error: String(e) }
+    }
   }
+  if (r.exitCode !== 0) return { error: r.stderr.trim() || r.error || `exit ${r.exitCode}`, exit_code: r.exitCode }
+  return { error: 'pipeline produced empty output', exit_code: r.exitCode }
 }
 
 function makeUserMessage(text) {
@@ -110,7 +117,8 @@ function stopPush(agentId) {
 
 function startPush(ctx, agent, flag, intervalSeconds) {
   stopPush(agent.id)
-  const intervalMs = Math.max(5, intervalSeconds) * 1000
+  const seconds = Number.isFinite(Number(intervalSeconds)) ? Math.round(Number(intervalSeconds)) : RUNTIME.pushIntervalSeconds
+  const intervalMs = Math.max(5, seconds) * 1000
   let polling = false
   const pollOnce = async () => {
     if (polling || !pushers.has(agent.id)) return
@@ -123,7 +131,8 @@ function startPush(ctx, agent, flag, intervalSeconds) {
       const data = await runPipeline('03_consume.py', [flag, '--mark-read'])
       if (data === null || typeof data !== 'object' || !Array.isArray(data.messages) || data.messages.length === 0) return
       const lines = data.messages.map((m) => {
-        const when = new Date((m.timestamp || 0) * 1000).toISOString()
+        const ts = Number(m.timestamp ?? m.ts ?? 0)
+        const when = ts > 0 ? new Date(ts * 1000).toISOString() : 'unknown-time'
         const files = Array.isArray(m.file_paths) && m.file_paths.length > 0 ? ` [files: ${m.file_paths.join(', ')}]` : ''
         return `- (${when}) ${String(m.content)}${files}`
       })
@@ -141,7 +150,7 @@ function startPush(ctx, agent, flag, intervalSeconds) {
   }
   const timer = setInterval(() => { void pollOnce() }, intervalMs)
   pushers.set(agent.id, () => clearInterval(timer))
-  return { flag, interval_seconds: Math.max(5, intervalSeconds) }
+  return { flag, interval_seconds: Math.max(5, seconds) }
 }
 
 function ensureListener(flag) {
@@ -175,7 +184,14 @@ function registerChannelTools(ctx, agent) {
     async execute(args) {
       const chatId = args.chat_id || RUNTIME.defaultChatId
       if (!chatId) return { error: 'no chat_id given and no defaultChatId configured (see cordis.patch.yml / HERMES_CHAT_ID)' }
-      const text = args.media_path ? `${args.message} MEDIA:${args.media_path}` : args.message
+      let mediaPath = ''
+      if (args.media_path) {
+        const resolved = path.resolve(String(args.media_path))
+        if (String(args.media_path).includes('..')) return { error: 'media_path must not contain ".."' }
+        if (!existsSync(resolved) || !statSync(resolved).isFile()) return { error: `media_path not found or not a file: ${resolved}` }
+        mediaPath = resolved
+      }
+      const text = mediaPath ? `${args.message} MEDIA:${mediaPath}` : args.message
       const r = await run(RUNTIME.hermesBin, ['send', '--to', `feishu:${chatId}`, String(text)], 60000)
       if (r.exitCode !== 0) return { error: r.stderr.trim() || r.error || 'hermes send failed', exit_code: r.exitCode }
       return { success: true, stdout: r.stdout.trim() }

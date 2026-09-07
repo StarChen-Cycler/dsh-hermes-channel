@@ -33,7 +33,7 @@ rl.close()
 let text = readFileSync(PATCH, 'utf8')
 for (const field of FIELDS) {
   const value = values[field.key]
-  const rendered = /^\d+$/.test(value) ? value : `"${value.replace(/"/g, '\\"')}"`
+  const rendered = /^\d+$/.test(value) ? value : `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
   const pattern = new RegExp(`(${field.key}:)\\s*("[^"]*"|\\d*)`)
   if (pattern.test(text)) {
     text = text.replace(pattern, `$1 ${rendered}`)

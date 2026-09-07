@@ -85,6 +85,13 @@ scripts/setup.mjs         interactive configuration writer
 ## Notes & limitations
 
 - Queued messages expire after 1 hour.
+- The queue assumes a single consumer per flag (one push loop or manual
+  consume); concurrent consumers on the same flag race on mark-read.
+- Listener health files (`logs/02_listen/`) are shared across flags — run one
+  listener per installation, or treat `hermes_channel_monitor` output as
+  global to the pipeline.
+- `hermes_channel_send` validates `media_path` (must be an existing file,
+  no `..` segments) before attaching.
 - The listener is a detached process; it survives plugin reloads but not OS
   restarts (use `hermes_channel_monitor` to detect and restart).
 - Push loops are per live agent and are torn down when the agent or the plugin
