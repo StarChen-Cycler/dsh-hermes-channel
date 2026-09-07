@@ -55,7 +55,7 @@ variable:
 |------|---------|
 | `hermes_channel_send` | Send text/Markdown/file to the user |
 | `hermes_channel_register` | Lease a unique reply flag for this agent |
-| `hermes_channel_listen_start` | Start the detached persistent listener |
+| `hermes_channel_listen_start` | Start the detached persistent listener (optional `chat_id` override) |
 | `hermes_channel_consume` | One-shot read of pending replies |
 | `hermes_channel_push_start` / `push_stop` | Real-time push into the session |
 | `hermes_channel_monitor` | Listener health + recommended action |

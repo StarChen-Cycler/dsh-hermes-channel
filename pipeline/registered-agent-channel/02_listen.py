@@ -30,7 +30,7 @@ def load_registrations() -> dict:
 
 
 def message_matches_flag(content: str, flag: str) -> bool:
-    return content.startswith(f"${flag} ")
+    return content == f"${flag}" or content.startswith(f"${flag} ")
 
 
 def main() -> int:
@@ -72,7 +72,7 @@ def main() -> int:
                 if not message_matches_flag(content, flag):
                     log_event(STEP, "ignored", message_id=msg_id, content_preview=content[:80])
                     continue
-                stripped = content[len(f"${flag} "):]
+                stripped = content[len(f"${flag}"):].lstrip()
                 append_message(flag, {
                     "id": msg_id,
                     "timestamp": ts,

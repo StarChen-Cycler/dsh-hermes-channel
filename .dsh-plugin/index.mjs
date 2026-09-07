@@ -153,8 +153,8 @@ function startPush(ctx, agent, flag, intervalSeconds) {
   return { flag, interval_seconds: Math.max(5, seconds) }
 }
 
-function ensureListener(flag) {
-  const child = spawn(RUNTIME.pythonBin, [path.join(PIPELINE, '02_listen.py'), flag], {
+function ensureListener(flag, chatId) {
+  const child = spawn(RUNTIME.pythonBin, [path.join(PIPELINE, '02_listen.py'), flag, '--chat-id', chatId], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
@@ -258,12 +258,17 @@ function registerChannelTools(ctx, agent) {
       + 'Idempotent-ish: check hermes_channel_monitor first to avoid duplicates.',
     parameters: schema({
       flag: { type: 'string', description: 'The flag to listen on' },
+      chat_id: { type: 'string', description: 'Feishu chat_id to listen on (default: configured defaultChatId)' },
     }, ['flag']),
     output: JSON_OUTPUT,
     async execute(args) {
+      const chatId = args.chat_id || RUNTIME.defaultChatId
+      if (!chatId) {
+        return { error: 'no chat_id given and no defaultChatId configured (see cordis.patch.yml / HERMES_CHAT_ID); the listener would fail its session gate' }
+      }
       try {
-        const pid = ensureListener(String(args.flag))
-        return { success: true, pid }
+        const pid = ensureListener(String(args.flag), String(chatId))
+        return { success: true, pid, chat_id: chatId }
       } catch (error) {
         return { error: String(error instanceof Error ? error.message : error) }
       }

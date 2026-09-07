@@ -27,7 +27,7 @@ It covers both directions:
 |------|---------|
 | `hermes_channel_send` | Send text/Markdown/file (`media_path`) to the user |
 | `hermes_channel_register` | Lease a unique flag and register this agent |
-| `hermes_channel_listen_start` | Start the detached persistent listener for a flag |
+| `hermes_channel_listen_start` | Start the detached persistent listener for a flag (optional `chat_id` override) |
 | `hermes_channel_consume` | One-shot read of pending replies (poll) |
 | `hermes_channel_push_start` | Start real-time push into THIS session |
 | `hermes_channel_push_stop` | Stop push for this session |
