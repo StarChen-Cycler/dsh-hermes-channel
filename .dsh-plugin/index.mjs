@@ -336,7 +336,8 @@ function pickString(value, fallback) {
 }
 
 export function apply(ctx) {
-  const cfg = (ctx.config !== null && typeof ctx.config === 'object') ? ctx.config : {}
+  const rawConfig = ctx.get('config')
+  const cfg = (rawConfig !== null && typeof rawConfig === 'object') ? rawConfig : {}
   RUNTIME.defaultChatId = pickString(cfg.defaultChatId, process.env.HERMES_CHAT_ID || '')
   RUNTIME.autoPushFlag = pickString(cfg.autoPushFlag, process.env.HERMES_CHANNEL_AUTOPUSH_FLAG || '')
   RUNTIME.pushIntervalSeconds = Number(cfg.pushIntervalSeconds) || Number(process.env.HERMES_CHANNEL_PUSH_INTERVAL) || 15
