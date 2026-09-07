@@ -174,11 +174,13 @@ function registerChannelTools(ctx, agent) {
   register({
     name: 'hermes_channel_send',
     description: 'Send a message to the user through the Hermes Feishu/Lark channel. '
-      + 'To receive a reply, include the flag in the text and ask the user to reply with "$<flag> ...".',
+      + 'To receive a reply, include the flag in the text and ask the user to reply with "$<flag> ...". '
+      + 'When the user asks to send a document or file, DEFAULT to media_path (transfer the file itself); '
+      + 'only paste file contents into message when the user explicitly wants the content as chat text.',
     parameters: schema({
       message: { type: 'string', description: 'Text to send (Markdown supported)' },
       chat_id: { type: 'string', description: 'Target chat_id (default: configured defaultChatId)' },
-      media_path: { type: 'string', description: 'Optional local file path to attach' },
+      media_path: { type: 'string', description: 'Local file path to attach. PREFERRED way to send documents/files — pass the file itself instead of pasting its content into message.' },
     }, ['message']),
     output: JSON_OUTPUT,
     async execute(args) {

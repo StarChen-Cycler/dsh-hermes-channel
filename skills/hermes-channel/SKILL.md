@@ -34,6 +34,20 @@ conversation is done.
 - The plugin row config (or env vars) must provide `defaultChatId`.
 - A flag must be registered before listening/pushing on it.
 
+## Sending Files (default policy)
+
+**When the user asks to send a document or file, DEFAULT TO `media_path`** —
+transfer the file itself:
+
+```
+hermes_channel_send(message: "📄 report.md", media_path: "C:/path/to/report.md")
+```
+
+Do NOT read the file and paste its contents into `message` — that rewrites the
+document as chat text, loses formatting/attachments, and hits message size
+limits. Inline the content as text ONLY when the user explicitly asks for the
+content to be sent as a channel message.
+
 ## Tool Map
 
 | Tool | Purpose |
