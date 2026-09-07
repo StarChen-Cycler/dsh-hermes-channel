@@ -1,0 +1,39 @@
+{
+  "name": "dsh-hermes-channel",
+  "version": "0.1.0",
+  "description": "Hermes Feishu/Lark channel for DeepSeek Harness: send messages to the user, receive replies via flags, and push them into the live session as waking follow-up turns.",
+  "type": "module",
+  "main": "./.dsh-plugin/index.mjs",
+  "exports": {
+    ".": "./.dsh-plugin/index.mjs",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    ".dsh-plugin",
+    "pipeline",
+    "skills",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "setup": "node scripts/setup.mjs"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "feishu",
+    "lark",
+    "hermes",
+    "channel"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

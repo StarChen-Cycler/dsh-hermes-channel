@@ -1,0 +1,34 @@
+# dsh-hermes-channel composition patch.
+# `dsh plugin --profile <profile> add dsh-hermes-channel` applies this patch.
+#
+# Every knob below has an environment-variable fallback; leave a value empty
+# to use the fallback. No secrets live here — only routing configuration.
+- insert:
+    - id: hermes-channel
+      name: dsh-hermes-channel
+      config:
+        # Feishu/Lark chat_id (oc_...) that outbound messages go to by default.
+        # env fallback: HERMES_CHAT_ID
+        defaultChatId: ""
+
+        # When set, every root session automatically starts push on this flag
+        # (the flag must be registered and have a listener running).
+        # env fallback: HERMES_CHANNEL_AUTOPUSH_FLAG
+        autoPushFlag: ""
+
+        # Poll interval for the push loop (seconds, minimum 5).
+        # env fallback: HERMES_CHANNEL_PUSH_INTERVAL
+        pushIntervalSeconds: 15
+
+        # Hermes CLI executable name or absolute path.
+        # env fallback: HERMES_BIN
+        hermesBin: "hermes"
+
+        # Python interpreter used for the pipeline scripts.
+        # env fallback: HERMES_CHANNEL_PYTHON
+        pythonBin: "python"
+
+        # Hermes home directory (contains state.db). Empty = platform default
+        # (%LOCALAPPDATA%/hermes on Windows, ~/.hermes elsewhere).
+        # env fallback: HERMES_HOME
+        hermesHome: ""

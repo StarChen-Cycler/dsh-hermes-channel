@@ -1,0 +1,11 @@
+{
+  "pool": [
+    "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta",
+    "iota", "kappa", "lambda", "mu", "nu", "xi", "omicron", "pi", "rho",
+    "sigma", "tau", "upsilon", "phi", "chi", "psi", "omega",
+    "red", "blue", "green", "yellow", "orange", "purple", "cyan", "magenta",
+    "oak", "pine", "maple", "birch", "cedar", "willow", "elm",
+    "wolf", "fox", "bear", "hawk", "owl", "raven", "lynx", "stag"
+  ],
+  "flags": {}
+}
