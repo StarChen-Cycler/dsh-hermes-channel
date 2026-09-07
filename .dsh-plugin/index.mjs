@@ -340,9 +340,11 @@ function pickString(value, fallback) {
   return typeof value === 'string' && value.length > 0 ? value : fallback
 }
 
-export function apply(ctx) {
-  const rawConfig = ctx.get('config')
-  const cfg = (rawConfig !== null && typeof rawConfig === 'object') ? rawConfig : {}
+export function apply(ctx, config) {
+  // Row config arrives as apply's SECOND argument (cordis loader contract;
+  // see @deepseek-ai/dsh-time-context). Neither ctx.config nor a 'config'
+  // service exists — both are blocked/absent.
+  const cfg = (config !== null && typeof config === 'object') ? config : {}
   RUNTIME.defaultChatId = pickString(cfg.defaultChatId, process.env.HERMES_CHAT_ID || '')
   RUNTIME.autoPushFlag = pickString(cfg.autoPushFlag, process.env.HERMES_CHANNEL_AUTOPUSH_FLAG || '')
   RUNTIME.pushIntervalSeconds = Number(cfg.pushIntervalSeconds) || Number(process.env.HERMES_CHANNEL_PUSH_INTERVAL) || 15

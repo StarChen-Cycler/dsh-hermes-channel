@@ -51,7 +51,7 @@ def main() -> int:
     if flag is None:
         import subprocess
         proc = subprocess.run(
-            [sys.executable, str(pool_script), "lease", "--random"],
+            [sys.executable, str(pool_script), "lease", "--random", "--agent", agent_id],
             capture_output=True, text=True, timeout=30,
         )
         if proc.returncode != 0:
