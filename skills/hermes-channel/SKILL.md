@@ -15,6 +15,19 @@ It covers both directions:
    polling (`hermes_channel_consume`) or by **push** (`hermes_channel_push_start`),
    which injects each reply as a waking follow-up turn in the live session.
 
+## First Contact (new session onboarding)
+
+If you are an agent in a **fresh session** and this skill is in your catalog,
+the plugin is already installed — the 8 `hermes_channel_*` tools are callable
+right now, nothing to install. Just follow the Standard Flow below.
+
+**Flag etiquette (important):** flags are per-session routing keys. Always
+lease your OWN flag with `hermes_channel_register`; never reuse another
+session's flag (two consumers on one flag eat each other's messages). If the
+user gives you a flag that "belongs" to another session, confirm before
+touching it. Release your flag with `hermes_channel_release` when the
+conversation is done.
+
 ## Prerequisites
 
 - The Hermes Gateway must be running (`hermes gateway status`).
@@ -62,4 +75,7 @@ if `recommended_action` is `restart_listener`, start the listener again.
 - Queued messages expire after 1 hour (TTL in the pipeline).
 - The listener is a detached process and survives plugin reloads; it dies with
   the host machine's restart and must then be restarted.
-- Auto-push for every session can be enabled via the `autoPushFlag` row config.
+- `hermes_channel_monitor` may recommend `restart_listener` even for a healthy
+  quiet listener (status files are shared across flags — known limitation).
+- Auto-push for every session can be enabled via the `autoPushFlag` row config
+  (not recommended: all sessions would share one flag; prefer per-session flags).
