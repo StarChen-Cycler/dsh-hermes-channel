@@ -135,16 +135,47 @@ function otherPoller(ctx, excludeAgentId, flag) {
   return undefined
 }
 
-/** Count of `turn/end` events in the agent's own log (delivery confirmation baseline). */
-function turnEndCount(agent) {
-  try {
-    const events = agent.session.snapshotEvents()
-    let count = 0
-    for (const event of events) if (event.type === 'turn/end') count += 1
-    return count
-  } catch {
-    return -1
+/**
+ * Read one agent's session event log across DSH versions.
+ *
+ * The session API changed shape: current builds expose `session.events` (a
+ * frozen snapshot array, reused until the next append), while older builds
+ * exposed `session.snapshotEvents()` / `session.ownEvents()`. Calling a method
+ * that no longer exists threw, which made every delivery look unsettled and
+ * produced an endless redelivery loop — so probe every known shape and never
+ * assume one.
+ *
+ * @returns the event array, or undefined when no supported accessor exists.
+ */
+function sessionEvents(agent) {
+  const session = agent?.session
+  if (session === null || session === undefined) return undefined
+  // Each accessor is probed independently: one throwing shape must not prevent
+  // the next from being tried.
+  const readers = [
+    () => (typeof session.snapshotEvents === 'function' ? session.snapshotEvents() : undefined),
+    () => session.events,
+    () => (typeof session.ownEvents === 'function' ? session.ownEvents() : undefined),
+  ]
+  for (const read of readers) {
+    try {
+      const events = read()
+      if (Array.isArray(events)) return events
+    } catch { /* try the next shape */ }
   }
+  return undefined
+}
+
+/**
+ * Count of `turn/end` events in the agent's own log (delivery baseline).
+ * @returns the count, or -1 when the log cannot be observed at all.
+ */
+function turnEndCount(agent) {
+  const events = sessionEvents(agent)
+  if (events === undefined) return -1
+  let count = 0
+  for (const event of events) if (event.type === 'turn/end') count += 1
+  return count
 }
 
 /** Leaf projection of the newest `turn/end` reason — never the live event object. */
@@ -159,23 +190,22 @@ function lastTurnEnd(agent) {
  * concurrent UI turn's outcome on the delivered batch.
  */
 function turnEndAt(agent, index) {
-  try {
-    const events = agent.session.snapshotEvents()
-    if (index < 0) {
-      for (let i = events.length - 1; i >= 0; i -= 1) {
-        const event = events[i]
-        if (event.type !== 'turn/end') continue
-        return projectTurnEnd(event)
-      }
-      return undefined
-    }
-    let seen = 0
-    for (const event of events) {
+  const events = sessionEvents(agent)
+  if (events === undefined) return undefined
+  if (index < 0) {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i]
       if (event.type !== 'turn/end') continue
-      if (seen === index) return projectTurnEnd(event)
-      seen += 1
+      return projectTurnEnd(event)
     }
-  } catch { /* fall through */ }
+    return undefined
+  }
+  let seen = 0
+  for (const event of events) {
+    if (event.type !== 'turn/end') continue
+    if (seen === index) return projectTurnEnd(event)
+    seen += 1
+  }
   return undefined
 }
 
@@ -300,30 +330,38 @@ function startPush(ctx, agent, flag, intervalSeconds) {
       // Confirm the delivery: ack only after the turn opened by this delivery closes.
       void (async () => {
         try {
+          const observable = baseline >= 0
           const settled = await waitForTurnEnd(agent, baseline, 600_000)
           // The turn that closed right after the baseline is ours; the newest
           // turn/end could belong to a concurrent UI turn.
-          const end = settled && baseline >= 0 ? turnEndAt(agent, baseline) : lastTurnEnd(agent)
-          if (baseline >= 0 && ids.length === 0) {
-            // A batch with no usable ids could never be acknowledged — refuse to
-            // claim success, otherwise the same content would be re-delivered forever.
-            consecutiveFailures += 1
-            backoffUntil = Date.now() + Math.min(30_000 * consecutiveFailures, 300_000)
-            ctx.logger.warn(`hermes-channel: batch for $${flag} carried no numeric message ids; leaving it queued`)
-          } else if (settled && !isRetryableFailure(end)) {
+          const end = settled && observable ? turnEndAt(agent, baseline) : lastTurnEnd(agent)
+          const ack = async () => {
             if (ids.length > 0) await runPipeline('06_ack.py', [flag, ...ids.map(String)])
             deliveryAttempts.delete(key)
             consecutiveFailures = 0
             backoffUntil = 0
+          }
+          if (!observable) {
+            // The session log could not be read at all (unsupported API shape).
+            // Acknowledge instead of looping: an unobservable outcome must never
+            // turn into an endless redelivery of the same batch.
+            await ack()
+            ctx.logger.warn(`hermes-channel: session events are unobservable for ${agent.id}; acknowledged ${ids.length} message(s) for $${flag} to avoid a redelivery loop`)
+          } else if (ids.length === 0) {
+            // Nothing could ever be acknowledged; count it against the delivery
+            // cap so it cannot spin forever, and never claim success.
+            deliveryAttempts.set(key, attempt)
+            consecutiveFailures += 1
+            backoffUntil = Date.now() + Math.min(30_000 * consecutiveFailures, 300_000)
+            ctx.logger.warn(`hermes-channel: batch for $${flag} carried no numeric message ids (attempt ${attempt}/${MAX_DELIVERY_ATTEMPTS}); leaving it queued`)
+          } else if (settled && !isRetryableFailure(end)) {
+            await ack()
             ctx.logger.info(`hermes-channel: acked ${ids.length} message(s) for $${flag} (turn ${end?.kind ?? 'unknown'}${end?.code ? '/' + end.code : ''})`)
           } else if (attempt >= MAX_DELIVERY_ATTEMPTS) {
             // The batch was delivered but its turns keep failing for a reason we
             // cannot fix by re-injecting. Stop the loop: acknowledge it, tell the
             // user once, and leave the transcript as the record.
-            if (ids.length > 0) await runPipeline('06_ack.py', [flag, ...ids.map(String)])
-            deliveryAttempts.delete(key)
-            consecutiveFailures = 0
-            backoffUntil = 0
+            await ack()
             ctx.logger.warn(`hermes-channel: giving up after ${attempt} deliveries for $${flag} (${end?.kind ?? 'no turn-end'}${end?.code ? '/' + end.code : ''}); batch acknowledged to stop the redelivery loop`)
             try {
               const chatId = RUNTIME.defaultChatId
@@ -534,14 +572,30 @@ function registerChannelTools(ctx, agent) {
 
   register({
     name: 'hermes_channel_release',
-    description: 'Release a channel flag back to the pool when the conversation is done.',
+    description: 'Close a channel: stop this session\'s push loop, stop every listener process for the flag, '
+      + 'and return the flag to the pool. Releasing without stopping the listener used to leave a process '
+      + 'capturing into a queue nobody would ever read.',
     parameters: schema({
       flag: { type: 'string', description: 'The flag to release' },
+      keep_listener: { type: 'boolean', description: 'Keep the listener running (default: false — releasing closes the channel)' },
     }, ['flag']),
     output: JSON_OUTPUT,
     async execute(args) {
+      const flag = String(args.flag)
+      const wasPolling = pusherFlag(agent.id)
       stopPush(agent.id)
-      return runPipeline('04_release.py', [String(args.flag)])
+      let killed = []
+      if (args.keep_listener !== true) {
+        try {
+          killed = await stopListeners(flag)
+        } catch { /* best effort: releasing the flag still matters */ }
+      }
+      const released = await runPipeline('04_release.py', [flag])
+      return {
+        ...(released !== null && typeof released === 'object' && !Array.isArray(released) ? released : { release: released }),
+        stopped_push: wasPolling === flag,
+        killed_listeners: killed,
+      }
     },
   })
 

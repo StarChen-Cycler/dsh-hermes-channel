@@ -55,12 +55,13 @@ variable:
 |------|---------|
 | `hermes_channel_send` | Send text/Markdown/file to the user |
 | `hermes_channel_register` | Lease a unique reply flag for this agent |
-| `hermes_channel_listen_start` | Start the listener for a flag — IDEMPOTENT (adopts the running one, kills duplicates); optional `chat_id` |
+| `hermes_channel_listen_start` | Start the listener for a flag — IDEMPOTENT (adopts the running one, kills duplicates) **and arms push into this session by default**; optional `chat_id`, `push: false` |
 | `hermes_channel_listen_stop` | Stop every listener process for a flag |
+| `hermes_channel_status` | Routing diagnosis: listener PIDs, queue depth, which session polls a flag |
 | `hermes_channel_consume` | One-shot read of pending replies |
 | `hermes_channel_push_start` / `push_stop` | Real-time push into the session |
 | `hermes_channel_monitor` | Listener health + recommended action |
-| `hermes_channel_release` | Return a flag to the pool |
+| `hermes_channel_release` | Close a channel: stop push, stop the flag's listeners, return the flag (`keep_listener: true` keeps the process) |
 
 ## Flags
 

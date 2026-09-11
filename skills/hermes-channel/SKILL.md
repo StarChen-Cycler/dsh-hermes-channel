@@ -88,7 +88,7 @@ content to be sent as a channel message.
 | `hermes_channel_push_start` | Start real-time push into THIS session |
 | `hermes_channel_push_stop` | Stop push for this session |
 | `hermes_channel_monitor` | Health check: listener status, queue depth, recommended action |
-| `hermes_channel_release` | Return a flag to the pool (also stops push) |
+| `hermes_channel_release` | Close a channel: stops this session's push, **stops the flag's listener processes**, returns the flag (`keep_listener: true` keeps the process) |
 
 ## The Contract: four steps, in this order
 
@@ -199,6 +199,10 @@ its own delivery opened:
 Retries are labelled in the injected header — `[FEISHU CHANNEL MESSAGE BATCH —
 RETRY 2/3 of the SAME batch; do not repeat work already done]` — so a receiving
 agent can see it is the same content and avoid duplicating work.
+
+If the session's own event log cannot be read at all (an unsupported API shape),
+the batch is acknowledged rather than re-injected: an unobservable outcome must
+never become an endless redelivery. The plugin logs a warning when that happens.
 
 Manual `hermes_channel_consume` is at-most-once by default (`mark_read: true`);
 pass `mark_read: false` to peek.
