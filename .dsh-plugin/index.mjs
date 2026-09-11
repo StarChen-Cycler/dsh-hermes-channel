@@ -445,7 +445,9 @@ function registerChannelTools(ctx, agent) {
     description: 'Register this agent for the Feishu channel and lease a unique reply flag. '
       + 'By default a short memorable WORD is assigned (e.g. "otter", "quartz") because the user '
       + 'must type "$<flag> " on every Feishu reply — avoid random strings. Pass "flag" to request '
-      + 'a specific name (3-16 lowercase letters/digits, starting with a letter).',
+      + 'a specific name (3-16 lowercase letters/digits, starting with a letter); registering again '
+      + 'with a different name RENAMES: the previous flag is released and its registration retired '
+      + '(listed in retired_flags).',
     parameters: schema({
       agent_id: { type: 'string', description: 'Identifier for this agent or request' },
       flag: { type: 'string', description: 'Preferred memorable flag name, e.g. "otter" (optional; a free word is assigned when omitted or taken)' },

@@ -71,9 +71,10 @@ A flag is the per-session routing key the user types on every Feishu reply
   pool of ~128 short, unambiguous words (`otter`, `quartz`, `topaz`, `heron`).
 - Pass `flag: "otter"` to choose the name yourself (3–16 lowercase
   letters/digits, starting with a letter). Invalid or in-use names are rejected.
-- Registering again with a different `flag` **renames**: the new name is leased
-  and the previous lease is released automatically. Finish with
-  `listen_start(new)` → `push_start(new)`.
+- Registering again with a different `flag` **renames**: the new name is leased,
+  the previous lease is released, and the previous registration is retired
+  (returned as `retired_flags`, so `hermes_channel_monitor` stops reporting it).
+  Finish with `listen_start(new)` → `push_start(new)`.
 
 ## Typical flow
 

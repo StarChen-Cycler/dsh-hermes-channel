@@ -41,9 +41,10 @@ memorable and short — never a random string like `2b12jh`.
   Rules: 3–16 chars, lowercase letters/digits, must start with a letter;
   an invalid or already-leased name is rejected with a clear error.
 - **Renaming**: calling register again with a different `flag` leases the new
-  name and automatically releases your previous one. Complete the switch with
-  `listen_start(new)` → `push_start(new)` (push_start replaces the session's
-  previous push loop), then release the old flag if it is still leased.
+  name, releases your previous lease, and retires your previous registration
+  (the result lists them in `retired_flags`, and `hermes_channel_monitor` stops
+  reporting the old flag). Complete the switch with `listen_start(new)` →
+  `push_start(new)` (push_start replaces the session's previous push loop).
 - Avoid names that look alike or are easy to mistype (`mu`/`nu`, `oak`/`okay`):
   prefer distinctive words such as `heron`, `amber`, `comet`.
 
