@@ -11,15 +11,22 @@ This plugin connects a DSH session to a locally configured **Hermes Feishu/Lark 
 It covers both directions:
 
 1. **Agent → User**: send text, Markdown, and files via `hermes_channel_send`.
-2. **User → Agent**: receive replies through a per-request `$flag`, either by
-   polling (`hermes_channel_consume`) or by **push** (`hermes_channel_push_start`),
-   which injects each reply as a waking follow-up turn in the live session.
+2. **User → Agent**: receive replies through a per-request `$flag`. Receiving
+   requires **push** (`hermes_channel_push_start`), which injects each reply as a
+   waking follow-up turn in the live session; `hermes_channel_consume` is only a
+   manual one-shot read.
 
 ## First Contact (new session onboarding)
 
 If you are an agent in a **fresh session** and this skill is in your catalog,
-the plugin is already installed — the 8 `hermes_channel_*` tools are callable
-right now, nothing to install. Just follow the Standard Flow below.
+the plugin is already installed — the `hermes_channel_*` tools are callable
+right now, nothing to install.
+
+**Then follow "The Contract: four steps, in this order" below and finish with
+`hermes_channel_status` before telling the user the channel is ready.** Do not
+treat the push step as optional: a listener without a push loop captures
+messages into a queue that nobody reads, which is indistinguishable from "the
+channel is broken".
 
 **Flag etiquette (important):** flags are per-session routing keys. Always
 lease your OWN flag with `hermes_channel_register`; never reuse another
@@ -83,16 +90,55 @@ content to be sent as a channel message.
 | `hermes_channel_monitor` | Health check: listener status, queue depth, recommended action |
 | `hermes_channel_release` | Return a flag to the pool (also stops push) |
 
-## Standard Flow
+## The Contract: four steps, in this order
+
+A channel is only half-built until **all four** steps are done. Steps 1–2 create
+the plumbing; **step 3 is what actually delivers replies to you**; step 4 proves
+it works. Skipping step 3 is the single most common failure — the listener keeps
+capturing messages, they pile up in the queue, and the user sees nothing.
+
+| # | Call | Done when |
+|---|------|-----------|
+| 1 | `hermes_channel_register(agent_id: "<name>")` | result has `flag` — a memorable word (or pass `flag: "otter"` to choose) |
+| 2 | `hermes_channel_listen_start(flag)` | result has `pid` and `push: "armed into this session every Ns"` (this call arms push for you; `push: false` skips it) |
+| 3 | `hermes_channel_send(message: "…reply with $<flag> …")` | result `success: true` — the user now knows which flag to use |
+| 4 | `hermes_channel_status(flag)` | **verification**: `listeners` non-empty, `this_session_armed: true` |
+
+Then, and only then, tell the user the channel is ready.
 
 ```
-1. hermes_channel_register(agent_id: "<name>")
-   → { flag: "otter" }                     ← a memorable word, or pass flag: "otter" yourself
-2. hermes_channel_listen_start(flag)       ← idempotent; ALSO arms push into this session
-3. hermes_channel_send(message: "…请回复 $otter <内容>")
-4. hermes_channel_status()                 ← optional check: listener + queue + who polls it
-5. hermes_channel_release(flag)            ← when done
+1. hermes_channel_register(agent_id: "<name>")     → { flag: "otter" }
+2. hermes_channel_listen_start(flag: "otter")      → { pid: 1234, push: "armed into this session every 15s" }
+3. hermes_channel_send(message: "…请回复 $otter …") → { success: true }
+4. hermes_channel_status(flag: "otter")            → this_session_armed: true   ← gate
 ```
+
+### Definition of done
+
+The channel is ready **only if** `hermes_channel_status` reports for your flag:
+
+- `listeners`: at least one PID — the capture side exists;
+- `this_session_armed: true` — **the delivery side exists**;
+- `queue_pending`: any number is fine (rows only leave after a delivered turn);
+- `push_armed_by`: your own session id (nobody else's).
+
+If `push_armed_by` names another session, or `this_session_armed` is false, the
+channel is NOT ready: run `hermes_channel_push_start(flag)` in this session.
+
+## Health Checks (run these, don't assume)
+
+| When | Run | Look for |
+|---|---|---|
+| Right after setup | `hermes_channel_status(flag)` | `this_session_armed: true`, one listener |
+| **After any DSH restart** | `hermes_channel_status(flag)` then `hermes_channel_push_start(flag)` if needed | push loops are **process-local** — a restart drops them while the listener survives, so replies silently stop arriving |
+| Replies seem to go missing | `hermes_channel_status(flag)` | `push_armed_by: null` → nobody polls; `queue_pending` growing → messages are queued but never delivered |
+| Listener health / staleness | `hermes_channel_monitor(flag)` | `recommended_action`; `restart_listener` also fires for a healthy quiet listener, so confirm with `hermes_channel_status` before restarting |
+| Duplicate replies | count listeners for the flag | more than one PID → `hermes_channel_listen_stop(flag)` then `listen_start(flag)` |
+| Replied but nothing arrived | `hermes_channel_consume(flag, mark_read: false)` | rows present = captured but not delivered (step 3 missing/stopped) |
+
+Re-arm policy: **whenever this session restarts or `push_start` has not been
+called since the last DSH start, call it again.** Re-arming is cheap and
+idempotent; a missing push loop is invisible until the user notices silence.
 
 ## How Replies Are Routed (read this before debugging "wrong session")
 
@@ -149,6 +195,12 @@ at-most-once by default (`mark_read: true`); pass `mark_read: false` to peek.
 
 ## Notes
 
+- **Why channels silently stop working** (the two failure modes seen in
+  practice): (a) the push loop was never armed — listener captures, queue grows,
+  nobody delivers; (b) DSH restarted — push loops are process-local and vanish,
+  while the detached listener survives, so everything looks healthy but is not.
+  Both are invisible without `hermes_channel_status`; both are fixed by one
+  `hermes_channel_push_start(flag)`.
 - **One listener per flag is a hard invariant.** Two listeners on the same flag
   each capture the same underlying message and append it to the queue, so the
   user receives it twice (or N times). `hermes_channel_listen_start` enforces the

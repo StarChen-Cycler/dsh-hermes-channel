@@ -78,14 +78,22 @@ A flag is the per-session routing key the user types on every Feishu reply
 
 ## Typical flow
 
+Four steps — the third one is what actually delivers replies, so never stop
+after the listener:
+
 ```
 hermes_channel_register(agent_id: "my-agent")      → flag "otter"
-hermes_channel_listen_start(flag: "otter")
-hermes_channel_send(message: "…请回复 $otter …")
-hermes_channel_push_start(flag: "otter")           # real-time mode
+hermes_channel_listen_start(flag: "otter")         # also arms push into this session
+hermes_channel_send(message: "…请回复 $otter …")    # user now knows the flag
+hermes_channel_status(flag: "otter")               # gate: this_session_armed must be true
 # …user replies in Feishu…  →  session wakes with the message
 hermes_channel_release(flag: "otter")
 ```
+
+Push loops are **process-local**: a DSH restart drops them while the detached
+listener survives, so re-run `hermes_channel_status` (and `push_start` when
+needed) after every restart. Reply routing is decided by the **flag**, not by
+the chat: several agents may share one Feishu DM while each owns its own flag.
 
 ## Repository layout
 
