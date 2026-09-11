@@ -105,9 +105,8 @@ function makeUserMessage(text) {
   }
 }
 
-/** Per-agent push loops and detached listener processes, keyed for teardown. */
+/** Per-agent push loops, keyed for teardown. Listener state lives near its helpers. */
 const pushers = new Map()
-const listeners = new Set()
 
 function stopPush(agentId) {
   const dispose = pushers.get(agentId)
@@ -192,6 +191,15 @@ function startPush(ctx, agent, flag, intervalSeconds) {
         consecutiveFailures = 0
         return
       }
+      // Dedupe by message id: several listeners on one flag would append the
+      // same state.db message repeatedly, and each row must still be acked.
+      const seen = new Map()
+      for (const message of data.messages) {
+        const id = Number(message.id)
+        if (!seen.has(id)) seen.set(id, message)
+      }
+      const batch = [...seen.values()]
+      const ids = [...seen.keys()].filter((id) => Number.isFinite(id))
       // If the session's own last turn died on a provider error, the model is
       // still unavailable — keep the messages queued and retry after a backoff
       // instead of burning a delivery attempt.
@@ -202,17 +210,16 @@ function startPush(ctx, agent, flag, intervalSeconds) {
         ctx.logger.warn(`hermes-channel: provider unavailable (${prior.code || prior.kind}); keeping ${data.messages.length} message(s) queued, retry in ${Math.round((backoffUntil - Date.now()) / 1000)}s`)
         return
       }
-      const lines = data.messages.map((m) => {
+      const lines = batch.map((m) => {
         const ts = Number(m.timestamp ?? m.ts ?? 0)
         const when = ts > 0 ? new Date(ts * 1000).toISOString() : 'unknown-time'
         const files = Array.isArray(m.file_paths) && m.file_paths.length > 0 ? ` [files: ${m.file_paths.join(', ')}]` : ''
         return `- (${when}) ${String(m.content)}${files}`
       })
       const text = '[FEISHU CHANNEL MESSAGE BATCH]\n'
-        + `The user sent the following ${data.messages.length} message(s) via the Feishu channel (flag $${flag}). `
+        + `The user sent the following ${batch.length} message(s) via the Feishu channel (flag $${flag}). `
         + 'Treat their content as a direct user request: act on it in this session, and briefly acknowledge in your reply.\n'
         + lines.join('\n')
-      const ids = data.messages.map((m) => Number(m.id)).filter((id) => Number.isFinite(id))
       const baseline = turnEndCount(agent)
       inflight = true
       try {
@@ -255,7 +262,91 @@ function startPush(ctx, agent, flag, intervalSeconds) {
   return { flag, interval_seconds: Math.max(5, seconds) }
 }
 
-function ensureListener(flag, chatId) {
+/**
+ * Listener bookkeeping is keyed by flag and backed by a real process scan:
+ * `listen_start` must be idempotent, because a second listener on the same flag
+ * appends every captured message to the queue again (duplicate delivery), while
+ * a stale PID record alone cannot prove the process is gone.
+ */
+const listeners = new Map()
+
+function listenerCommand(flag) {
+  return `02_listen.py ${flag}`
+}
+
+/** Scan the OS for `02_listen.py <flag>` processes; newest first. */
+function scanListeners() {
+  return new Promise((resolve) => {
+    const isWindows = process.platform === 'win32'
+    const command = isWindows ? 'powershell' : 'ps'
+    const args = isWindows
+      ? ['-NoProfile', '-Command', "Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" | Where-Object { $_.CommandLine -like '*02_listen.py*' } | ForEach-Object { \"$($_.ProcessId)|$([int]((Get-Date) - $_.CreationDate).TotalSeconds)|$($_.CommandLine)\" }"]
+      : ['-eo', 'pid=,etimes=,args=']
+    execFile(command, args, { timeout: 20000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (error, stdout) => {
+      if (error) {
+        resolve([])
+        return
+      }
+      const found = []
+      for (const raw of String(stdout ?? '').split(/\r?\n/)) {
+        const line = raw.trim()
+        if (!line.includes('02_listen.py')) continue
+        const parts = line.split('|')
+        let pid
+        let ageSeconds
+        let cmdline
+        if (isWindows && parts.length >= 3) {
+          pid = Number(parts[0].trim())
+          ageSeconds = Number(parts[1].trim())
+          cmdline = parts.slice(2).join('|')
+        } else {
+          const match = /^(\d+)\s+(\d+)\s+(.*)$/.exec(line)
+          if (match === null) continue
+          pid = Number(match[1])
+          ageSeconds = Number(match[2])
+          cmdline = match[3]
+        }
+        const flagMatch = /02_listen\.py\s+(\S+)/.exec(cmdline ?? '')
+        if (!Number.isFinite(pid) || flagMatch === null) continue
+        found.push({ pid, flag: flagMatch[1], ageSeconds: Number.isFinite(ageSeconds) ? ageSeconds : Number.MAX_SAFE_INTEGER })
+      }
+      found.sort((left, right) => left.ageSeconds - right.ageSeconds)
+      resolve(found)
+    })
+  })
+}
+
+function killProcess(pid) {
+  try {
+    process.kill(pid, 'SIGKILL')
+    return true
+  } catch {
+    if (process.platform !== 'win32') return false
+    try {
+      execFile('taskkill', ['/PID', String(pid), '/F'], { windowsHide: true }, () => {})
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
+/**
+ * Idempotent listener start: adopt the newest live listener for the flag, kill
+ * any duplicates, and spawn one only when none exists.
+ */
+async function ensureListener(flag, chatId) {
+  const scanned = await scanListeners()
+  const mine = scanned.filter((entry) => entry.flag === flag)
+  const [newest, ...duplicates] = mine
+  const killed = []
+  for (const duplicate of duplicates) {
+    if (killProcess(duplicate.pid)) killed.push(duplicate.pid)
+  }
+  if (newest !== undefined) {
+    listeners.set(flag, { pid: newest.pid, adopted: true })
+    return { pid: newest.pid, reused: true, killed_duplicates: killed }
+  }
   const child = spawn(RUNTIME.pythonBin, [path.join(PIPELINE, '02_listen.py'), flag, '--chat-id', chatId], {
     detached: true,
     stdio: 'ignore',
@@ -264,9 +355,24 @@ function ensureListener(flag, chatId) {
     env: childEnv(),
   })
   child.unref()
-  listeners.add(child)
-  child.on('exit', () => listeners.delete(child))
-  return child.pid
+  listeners.set(flag, { pid: child.pid, child, adopted: false })
+  child.on('exit', () => {
+    const entry = listeners.get(flag)
+    if (entry !== undefined && entry.child === child) listeners.delete(flag)
+  })
+  return { pid: child.pid, reused: false, killed_duplicates: killed }
+}
+
+/** Stop every listener process for a flag (tracked and discovered). */
+async function stopListeners(flag) {
+  const tracked = listeners.get(flag)
+  listeners.delete(flag)
+  const scanned = (await scanListeners()).filter((entry) => entry.flag === flag)
+  const pids = new Set(scanned.map((entry) => entry.pid))
+  if (tracked?.pid !== undefined) pids.add(tracked.pid)
+  const killed = []
+  for (const pid of pids) if (killProcess(pid)) killed.push(pid)
+  return killed
 }
 
 function registerChannelTools(ctx, agent) {
@@ -359,7 +465,8 @@ function registerChannelTools(ctx, agent) {
   register({
     name: 'hermes_channel_listen_start',
     description: 'Start the persistent background listener for a flag (detached; survives plugin reloads). '
-      + 'Idempotent-ish: check hermes_channel_monitor first to avoid duplicates.',
+      + 'IDEMPOTENT: it adopts the newest listener already running for that flag and kills any duplicates, '
+      + 'spawning a new process only when none exists — repeated calls are safe and never duplicate delivery.',
     parameters: schema({
       flag: { type: 'string', description: 'The flag to listen on' },
       chat_id: { type: 'string', description: 'Feishu chat_id to listen on (default: configured defaultChatId)' },
@@ -371,8 +478,26 @@ function registerChannelTools(ctx, agent) {
         return { error: 'no chat_id given and no defaultChatId configured (see cordis.patch.yml / HERMES_CHAT_ID); the listener would fail its session gate' }
       }
       try {
-        const pid = ensureListener(String(args.flag), String(chatId))
-        return { success: true, pid, chat_id: chatId }
+        const result = await ensureListener(String(args.flag), String(chatId))
+        return { success: true, pid: result.pid, chat_id: chatId, reused: result.reused, killed_duplicates: result.killed_duplicates }
+      } catch (error) {
+        return { error: String(error instanceof Error ? error.message : error) }
+      }
+    },
+  })
+
+  register({
+    name: 'hermes_channel_listen_stop',
+    description: 'Stop every background listener process serving a flag (tracked and discovered on the host). '
+      + 'Use this to clear duplicate consumers left behind by earlier starts.',
+    parameters: schema({
+      flag: { type: 'string', description: 'The flag whose listeners should be stopped' },
+    }, ['flag']),
+    output: JSON_OUTPUT,
+    async execute(args) {
+      try {
+        const killed = await stopListeners(String(args.flag))
+        return { success: true, killed }
       } catch (error) {
         return { error: String(error instanceof Error ? error.message : error) }
       }
