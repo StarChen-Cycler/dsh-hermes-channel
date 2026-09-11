@@ -78,7 +78,12 @@ def load_registry(path: Path) -> Dict[str, Any]:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        data.setdefault("pool", DEFAULT_POOL.copy())
+        # Union, not setdefault: an existing registry keeps its leased/legacy
+        # entries while newly shipped memorable words still become available.
+        pool = data.setdefault("pool", [])
+        for word in DEFAULT_POOL:
+            if word not in pool:
+                pool.append(word)
         data.setdefault("flags", {})
         return data
     except Exception as exc:
@@ -156,9 +161,11 @@ def cmd_lease(args: argparse.Namespace) -> int:
         if not available:
             print(json.dumps({"error": "No flags available in pool. Use --random to generate one."}), file=sys.stderr)
             return 1
-        # Prefer word-shaped flags over legacy random strings when both exist.
+        # Prefer word-shaped, distinctive flags (>=4 letters) over short Greek
+        # letters and legacy random strings; fall back when the pool is thin.
+        preferred_words = [f for f in available if f.isalpha() and len(f) >= 4]
         words = [f for f in available if f.isalpha()]
-        chosen = random.choice(words or available)
+        chosen = random.choice(preferred_words or words or available)
 
     data["flags"][chosen] = {
         "agent": agent,
