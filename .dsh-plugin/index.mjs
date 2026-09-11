@@ -115,21 +115,93 @@ function stopPush(agentId) {
   pushers.delete(agentId)
 }
 
+/** Count of `turn/end` events in the agent's own log (delivery confirmation baseline). */
+function turnEndCount(agent) {
+  try {
+    const events = agent.session.snapshotEvents()
+    let count = 0
+    for (const event of events) if (event.type === 'turn/end') count += 1
+    return count
+  } catch {
+    return -1
+  }
+}
+
+/** Leaf projection of the newest `turn/end` reason — never the live event object. */
+function lastTurnEnd(agent) {
+  try {
+    const events = agent.session.snapshotEvents()
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const event = events[i]
+      if (event.type !== 'turn/end') continue
+      const reason = event.data.reason
+      return {
+        kind: typeof reason?.kind === 'string' ? reason.kind : 'unknown',
+        code: typeof reason?.error?.code === 'string' ? reason.error.code : '',
+        message: typeof reason?.error?.message === 'string' ? reason.error.message.slice(0, 200) : '',
+      }
+    }
+  } catch { /* fall through */ }
+  return undefined
+}
+
+/** Whether a failed turn looks like a transient provider problem worth retrying. */
+function isRetryableFailure(end) {
+  if (end === undefined) return false
+  if (end.kind !== 'error') return false
+  return end.code === 'RATE_LIMIT' || end.code === 'TIMEOUT' || end.code === 'NETWORK'
+    || end.code === 'SERVER_ERROR' || end.code === 'OVERLOADED' || end.code === ''
+}
+
+/** Wait for a NEW turn/end beyond the baseline count, bounded by a timeout. */
+function waitForTurnEnd(agent, baselineCount, timeoutMs) {
+  return new Promise((resolve) => {
+    const deadline = Date.now() + timeoutMs
+    const tick = () => {
+      const count = turnEndCount(agent)
+      if (count < 0) return resolve(false)
+      if (count > baselineCount) return resolve(true)
+      if (Date.now() >= deadline) return resolve(false)
+      setTimeout(tick, 500)
+    }
+    setTimeout(tick, 250)
+  })
+}
+
 function startPush(ctx, agent, flag, intervalSeconds) {
   stopPush(agent.id)
   const seconds = Number.isFinite(Number(intervalSeconds)) ? Math.round(Number(intervalSeconds)) : RUNTIME.pushIntervalSeconds
   const intervalMs = Math.max(5, seconds) * 1000
   let polling = false
+  let inflight = false
+  let backoffUntil = 0
+  let consecutiveFailures = 0
+
   const pollOnce = async () => {
-    if (polling || !pushers.has(agent.id)) return
+    if (polling || inflight || !pushers.has(agent.id)) return
+    if (Date.now() < backoffUntil) return
     polling = true
     try {
       if (ctx.agents.get(agent.id) !== agent) {
         stopPush(agent.id)
         return
       }
-      const data = await runPipeline('03_consume.py', [flag, '--mark-read'])
-      if (data === null || typeof data !== 'object' || !Array.isArray(data.messages) || data.messages.length === 0) return
+      // PEEK only: nothing is acknowledged until the delivered turn succeeds.
+      const data = await runPipeline('03_consume.py', [flag])
+      if (data === null || typeof data !== 'object' || !Array.isArray(data.messages) || data.messages.length === 0) {
+        consecutiveFailures = 0
+        return
+      }
+      // If the session's own last turn died on a provider error, the model is
+      // still unavailable — keep the messages queued and retry after a backoff
+      // instead of burning a delivery attempt.
+      const prior = lastTurnEnd(agent)
+      if (isRetryableFailure(prior)) {
+        consecutiveFailures += 1
+        backoffUntil = Date.now() + Math.min(30_000 * consecutiveFailures, 300_000)
+        ctx.logger.warn(`hermes-channel: provider unavailable (${prior.code || prior.kind}); keeping ${data.messages.length} message(s) queued, retry in ${Math.round((backoffUntil - Date.now()) / 1000)}s`)
+        return
+      }
       const lines = data.messages.map((m) => {
         const ts = Number(m.timestamp ?? m.ts ?? 0)
         const when = ts > 0 ? new Date(ts * 1000).toISOString() : 'unknown-time'
@@ -140,8 +212,38 @@ function startPush(ctx, agent, flag, intervalSeconds) {
         + `The user sent the following ${data.messages.length} message(s) via the Feishu channel (flag $${flag}). `
         + 'Treat their content as a direct user request: act on it in this session, and briefly acknowledge in your reply.\n'
         + lines.join('\n')
-      agent.followup(makeUserMessage(text))
-      ctx.logger.info(`hermes-channel: pushed ${data.messages.length} message(s) to agent ${agent.id}`)
+      const ids = data.messages.map((m) => Number(m.id)).filter((id) => Number.isFinite(id))
+      const baseline = turnEndCount(agent)
+      inflight = true
+      try {
+        agent.followup(makeUserMessage(text))
+      } catch (error) {
+        inflight = false
+        ctx.logger.warn(`hermes-channel: followup failed for $${flag}: ${error instanceof Error ? error.message : String(error)}`)
+        return
+      }
+      ctx.logger.info(`hermes-channel: delivered ${data.messages.length} message(s) to agent ${agent.id}; awaiting turn result`)
+      // Confirm the delivery: ack only after a turn actually closed successfully.
+      void (async () => {
+        try {
+          const settled = await waitForTurnEnd(agent, baseline, 600_000)
+          const end = lastTurnEnd(agent)
+          if (settled && !isRetryableFailure(end)) {
+            if (ids.length > 0) await runPipeline('06_ack.py', [flag, ...ids.map(String)])
+            consecutiveFailures = 0
+            backoffUntil = 0
+            ctx.logger.info(`hermes-channel: acked ${ids.length} message(s) for $${flag} (turn ${end?.kind ?? 'unknown'})`)
+          } else {
+            consecutiveFailures += 1
+            backoffUntil = Date.now() + Math.min(30_000 * consecutiveFailures, 300_000)
+            ctx.logger.warn(`hermes-channel: turn did not complete (${end?.kind ?? 'no turn-end'}${end?.code ? '/' + end.code : ''}); ${ids.length} message(s) stay queued, retry in ${Math.round((backoffUntil - Date.now()) / 1000)}s`)
+          }
+        } catch (error) {
+          ctx.logger.warn(`hermes-channel: delivery confirmation failed: ${error instanceof Error ? error.message : String(error)}`)
+        } finally {
+          inflight = false
+        }
+      })()
     } catch (error) {
       ctx.logger.warn(`hermes-channel: poll failed for $${flag}: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
@@ -281,7 +383,9 @@ function registerChannelTools(ctx, agent) {
     name: 'hermes_channel_push_start',
     description: 'Start pushing Feishu channel replies for a flag directly into THIS session as waking '
       + 'follow-up turns. Every user reply is injected as a user message that invokes work here, '
-      + 'even while the session is idle. Requires the persistent listener (hermes_channel_listen_start).',
+      + 'even while the session is idle. Delivery is at-least-once: a reply is only acknowledged after '
+      + 'its turn completes, so provider rate limiting or a transient failure leaves it queued for retry. '
+      + 'Requires the persistent listener (hermes_channel_listen_start).',
     parameters: schema({
       flag: { type: 'string', description: 'The channel flag assigned at registration' },
       interval_seconds: { type: 'number', description: 'Poll interval in seconds (default: configured pushIntervalSeconds, minimum: 5)' },

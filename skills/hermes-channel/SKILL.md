@@ -84,9 +84,26 @@ Push requires the persistent listener for the same flag
 (`hermes_channel_listen_start`). Check health with `hermes_channel_monitor`;
 if `recommended_action` is `restart_listener`, start the listener again.
 
+### Delivery semantics (at-least-once)
+
+The push loop PEEKS the queue, injects the batch, then waits for the turn to
+close:
+
+- turn completed → the messages are acknowledged (`06_ack.py`) and leave the queue;
+- turn failed with a transient provider error (`RATE_LIMIT`/`TIMEOUT`/`NETWORK`/
+  server error) → nothing is acknowledged; the messages stay queued and are
+  re-delivered after an exponential backoff (30s → 5min cap);
+- while the session's last turn is a retryable provider failure, the loop waits
+  instead of delivering, so a rate-limited model cannot swallow user replies.
+
+Consequence: you may see the same batch twice after a failed turn — that is the
+intended retry, not a duplicate bug. Manual `hermes_channel_consume` is
+at-most-once by default (`mark_read: true`); pass `mark_read: false` to peek.
+
 ## Notes
 
-- Queued messages expire after 1 hour (TTL in the pipeline).
+- Queued messages expire after 1 hour (TTL in the pipeline) — a long provider
+  outage can therefore outlive a queued reply.
 - The listener is a detached process and survives plugin reloads; it dies with
   the host machine's restart and must then be restarted.
 - `hermes_channel_monitor` may recommend `restart_listener` even for a healthy

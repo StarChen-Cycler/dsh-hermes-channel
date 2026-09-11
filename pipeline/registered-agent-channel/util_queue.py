@@ -52,16 +52,27 @@ def read_pending(flag: str, limit: Optional[int] = None) -> List[Dict[str, Any]]
 
 def mark_read(flag: str, message_id: Optional[int] = None) -> int:
     """Mark queue entries as read. If message_id is given, mark only that entry."""
+    return mark_read_many(flag, None if message_id is None else [message_id])
+
+
+def mark_read_many(flag: str, message_ids: Optional[List[int]] = None) -> int:
+    """Mark specific queue entries as read (all unread entries when ids is None).
+
+    Acknowledgement is deliberately separate from reading: a consumer peeks,
+    delivers, and only acks after the delivery actually succeeded — a failed
+    turn (e.g. provider rate limiting) must leave the message pending for retry.
+    """
     path = queue_path(flag)
     if not path.exists():
         return 0
+    wanted = None if message_ids is None else set(message_ids)
     lines = []
     changed = 0
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         entry = json.loads(line)
-        if not entry.get("read") and (message_id is None or entry.get("id") == message_id):
+        if not entry.get("read") and (wanted is None or entry.get("id") in wanted):
             entry["read"] = True
             changed += 1
         lines.append(json.dumps(entry, ensure_ascii=False))
