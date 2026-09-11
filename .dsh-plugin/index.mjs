@@ -105,13 +105,34 @@ function makeUserMessage(text) {
   }
 }
 
-/** Per-agent push loops, keyed for teardown. Listener state lives near its helpers. */
+/** Per-agent push loops: agentId -> { flag, dispose }. */
 const pushers = new Map()
 
 function stopPush(agentId) {
-  const dispose = pushers.get(agentId)
-  if (dispose !== undefined) dispose()
+  const entry = pushers.get(agentId)
+  if (entry !== undefined) entry.dispose()
   pushers.delete(agentId)
+}
+
+/** The flag a live session currently polls, if any. */
+function pusherFlag(agentId) {
+  const entry = pushers.get(agentId)
+  return entry === undefined ? undefined : entry.flag
+}
+
+/**
+ * Find another session in this process that already polls a flag. Two live
+ * sessions on one flag both inject the same replies — the exact failure that
+ * looks like "both flags arrive in the same session".
+ */
+function otherPoller(ctx, excludeAgentId, flag) {
+  for (const [agentId, entry] of pushers) {
+    if (agentId === excludeAgentId) continue
+    if (flag !== undefined && entry.flag !== flag) continue
+    if (ctx.agents.get(agentId) === undefined) continue
+    return { agentId, flag: entry.flag }
+  }
+  return undefined
 }
 
 /** Count of `turn/end` events in the agent's own log (delivery confirmation baseline). */
@@ -294,7 +315,7 @@ function startPush(ctx, agent, flag, intervalSeconds) {
     }
   }
   const timer = setInterval(() => { void pollOnce() }, intervalMs)
-  pushers.set(agent.id, () => clearInterval(timer))
+  pushers.set(agent.id, { flag, dispose: () => clearInterval(timer) })
   return { flag, interval_seconds: Math.max(5, seconds) }
 }
 
@@ -505,22 +526,86 @@ function registerChannelTools(ctx, agent) {
     name: 'hermes_channel_listen_start',
     description: 'Start the persistent background listener for a flag (detached; survives plugin reloads). '
       + 'IDEMPOTENT: it adopts the newest listener already running for that flag and kills any duplicates, '
-      + 'spawning a new process only when none exists — repeated calls are safe and never duplicate delivery.',
+      + 'spawning a new process only when none exists — repeated calls are safe and never duplicate delivery. '
+      + 'The listener alone does NOT deliver anything: that is the push loop. Because forgetting it is silent, '
+      + 'this tool ALSO arms push for the calling session by default (pass push:false for listener-only).',
     parameters: schema({
       flag: { type: 'string', description: 'The flag to listen on' },
       chat_id: { type: 'string', description: 'Feishu chat_id to listen on (default: configured defaultChatId)' },
+      push: { type: 'boolean', description: 'Also arm push into this session (default: true). Set false for listener-only.' },
+      interval_seconds: { type: 'number', description: 'Push poll interval in seconds when push is armed (default: configured pushIntervalSeconds, minimum: 5)' },
     }, ['flag']),
     output: JSON_OUTPUT,
     async execute(args) {
+      const flag = String(args.flag)
       const chatId = args.chat_id || RUNTIME.defaultChatId
       if (!chatId) {
         return { error: 'no chat_id given and no defaultChatId configured (see cordis.patch.yml / HERMES_CHAT_ID); the listener would fail its session gate' }
       }
       try {
-        const result = await ensureListener(String(args.flag), String(chatId))
-        return { success: true, pid: result.pid, chat_id: chatId, reused: result.reused, killed_duplicates: result.killed_duplicates }
+        const result = await ensureListener(flag, String(chatId))
+        const payload = {
+          success: true,
+          flag,
+          pid: result.pid,
+          chat_id: chatId,
+          reused: result.reused,
+          killed_duplicates: result.killed_duplicates,
+        }
+        if (args.push === false) {
+          payload.push = 'not armed (push:false) — replies will queue until hermes_channel_push_start is called'
+          return payload
+        }
+        const interval = Math.max(5, Number(args.interval_seconds) || RUNTIME.pushIntervalSeconds)
+        const state = startPush(ctx, agent, flag, interval)
+        payload.push = `armed into this session every ${state.interval_seconds}s`
+        const other = otherPoller(ctx, agent.id)
+        if (other !== undefined && other.flag === flag) {
+          payload.warning = `another live session (${other.agentId}) already polls $${flag}; replies will be delivered to whichever session armed it last`
+        }
+        return payload
       } catch (error) {
         return { error: String(error instanceof Error ? error.message : error) }
+      }
+    },
+  })
+
+  register({
+    name: 'hermes_channel_status',
+    description: 'Diagnose channel routing for every flag you care about: which flags have a listener running, '
+      + 'how many queue rows are pending, and which live session (if any) has a push loop armed. '
+      + 'Use this when replies seem to go missing or to the wrong session.',
+    parameters: schema({
+      flag: { type: 'string', description: 'Check one flag (omit to list every flag with a queue or listener)' },
+    }, []),
+    output: JSON_OUTPUT,
+    async execute(args) {
+      try {
+        const listenersNow = await scanListeners()
+        const want = typeof args.flag === 'string' && args.flag.length > 0 ? String(args.flag) : undefined
+        const flags = new Set()
+        for (const entry of listenersNow) flags.add(entry.flag)
+        for (const key of pushers.keys()) {
+          const bound = pusherFlag(key)
+          if (bound !== undefined) flags.add(bound)
+        }
+        const inspected = want !== undefined ? [want] : [...flags]
+        const rows = []
+        for (const flag of inspected) {
+          const queue = await runPipeline('03_consume.py', [flag])
+          const pending = queue !== null && typeof queue === 'object' && Array.isArray(queue.messages) ? queue.messages.length : null
+          const poller = otherPoller(ctx, undefined, flag)
+          rows.push({
+            flag,
+            listeners: listenersNow.filter((entry) => entry.flag === flag).map((entry) => entry.pid),
+            queue_pending: pending,
+            push_armed_by: poller === undefined ? null : poller.agentId,
+            this_session_armed: pusherFlag(agent.id) === flag,
+          })
+        }
+        return { success: true, rows }
+      } catch (error) {
+        return { error: String(error instanceof Error ? error.message : String(error)) }
       }
     },
   })
@@ -557,14 +642,24 @@ function registerChannelTools(ctx, agent) {
     output: JSON_OUTPUT,
     async execute(args) {
       const interval = Math.max(5, Number(args.interval_seconds) || RUNTIME.pushIntervalSeconds)
-      const state = startPush(ctx, agent, String(args.flag), interval)
-      return {
+      const flag = String(args.flag)
+      const previous = pusherFlag(agent.id)
+      const state = startPush(ctx, agent, flag, interval)
+      const payload = {
         success: true,
         flag: state.flag,
         agent_id: agent.id,
         interval_seconds: state.interval_seconds,
         note: `Feishu replies prefixed with $${state.flag} will now be pushed into this session automatically.`,
       }
+      if (previous !== undefined && previous !== flag) {
+        payload.replaced = `this session stopped polling $${previous} (one push loop per session)`
+      }
+      const other = otherPoller(ctx, agent.id, flag)
+      if (other !== undefined) {
+        payload.warning = `another live session (${other.agentId}) also polls $${flag}; both will inject the same replies — use distinct flags per session`
+      }
+      return payload
     },
   })
 

@@ -74,8 +74,9 @@ content to be sent as a channel message.
 |------|---------|
 | `hermes_channel_send` | Send text/Markdown/file (`media_path`) to the user |
 | `hermes_channel_register` | Lease a unique reply flag — auto-assigns a memorable word, or pass `flag: "otter"` to choose; renaming releases the previous flag |
-| `hermes_channel_listen_start` | Start the listener for a flag — IDEMPOTENT: adopts a running listener, kills duplicates, spawns only when none exists (optional `chat_id`) |
+| `hermes_channel_listen_start` | Start the listener for a flag — IDEMPOTENT (adopts a running listener, kills duplicates, spawns only when none exists) **and arms push into this session by default** (`push: false` for listener-only) |
 | `hermes_channel_listen_stop` | Stop every listener process for a flag (clears duplicates) |
+| `hermes_channel_status` | Routing diagnosis: per flag — listener PIDs, queue depth, which session has push armed |
 | `hermes_channel_consume` | One-shot read of pending replies (poll) |
 | `hermes_channel_push_start` | Start real-time push into THIS session |
 | `hermes_channel_push_stop` | Stop push for this session |
@@ -87,12 +88,37 @@ content to be sent as a channel message.
 ```
 1. hermes_channel_register(agent_id: "<name>")
    → { flag: "otter" }                     ← a memorable word, or pass flag: "otter" yourself
-2. hermes_channel_listen_start(flag)       ← idempotent; safe to call again
+2. hermes_channel_listen_start(flag)       ← idempotent; ALSO arms push into this session
 3. hermes_channel_send(message: "…请回复 $otter <内容>")
-4. hermes_channel_push_start(flag)         ← real-time mode (recommended)
-   …or poll with hermes_channel_consume(flag)
+4. hermes_channel_status()                 ← optional check: listener + queue + who polls it
 5. hermes_channel_release(flag)            ← when done
 ```
+
+## How Replies Are Routed (read this before debugging "wrong session")
+
+Three separate pieces, and a reply only reaches you when **all three** line up:
+
+| Piece | Scope | What it does |
+|---|---|---|
+| listener (`02_listen.py <flag>`) | per flag, one process | captures `$flag …` messages from the Feishu store into that flag's queue |
+| queue | per flag | durable rows; a row leaves only when acked after a delivered turn |
+| push loop | **per session, one flag at a time** | polls one flag's queue and injects batches into that session |
+
+Consequences you must know:
+
+- **A listener without a push loop delivers nothing.** Replying to `$flag` then
+  looks like "the message went somewhere else" while it is actually sitting in
+  the queue. `hermes_channel_listen_start` now arms push for you by default, and
+  `hermes_channel_status` shows `push_armed_by: null` when nobody polls a flag.
+- **One push loop per session**: calling `push_start` with a new flag replaces
+  the previous one (the result reports `replaced`). A session cannot serve two
+  flags at once — use one session per channel.
+- **Two sessions on one flag** both inject the same replies; `push_start`
+  reports a `warning` when it detects another live session already polling that
+  flag.
+- Both agents may still **send** into the same Feishu DM (same `chat_id`); that
+  is normal and unrelated to routing — the flag, not the chat, decides which
+  session receives a reply.
 
 ## Push Mode (the reason this plugin exists)
 
