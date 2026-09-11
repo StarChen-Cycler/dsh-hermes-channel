@@ -54,7 +54,8 @@ content to be sent as a channel message.
 |------|---------|
 | `hermes_channel_send` | Send text/Markdown/file (`media_path`) to the user |
 | `hermes_channel_register` | Lease a unique flag and register this agent |
-| `hermes_channel_listen_start` | Start the detached persistent listener for a flag (optional `chat_id` override) |
+| `hermes_channel_listen_start` | Start the listener for a flag — IDEMPOTENT: adopts a running listener, kills duplicates, spawns only when none exists (optional `chat_id`) |
+| `hermes_channel_listen_stop` | Stop every listener process for a flag (clears duplicates) |
 | `hermes_channel_consume` | One-shot read of pending replies (poll) |
 | `hermes_channel_push_start` | Start real-time push into THIS session |
 | `hermes_channel_push_stop` | Stop push for this session |
@@ -102,6 +103,15 @@ at-most-once by default (`mark_read: true`); pass `mark_read: false` to peek.
 
 ## Notes
 
+- **One listener per flag is a hard invariant.** Two listeners on the same flag
+  each capture the same underlying message and append it to the queue, so the
+  user receives it twice (or N times). `hermes_channel_listen_start` enforces the
+  invariant by scanning the host for `02_listen.py <flag>` processes: it adopts
+  the newest, kills the rest, and spawns only when none exists — so calling it
+  repeatedly (or from two sessions) is safe. Use `hermes_channel_listen_stop`
+  to clear a flag's listeners completely.
+- Delivery also dedupes by message id, so a batch never repeats content even if
+  duplicate queue rows exist from an earlier stray listener.
 - Queued messages expire after 1 hour (TTL in the pipeline) — a long provider
   outage can therefore outlive a queued reply.
 - The listener is a detached process and survives plugin reloads; it dies with
