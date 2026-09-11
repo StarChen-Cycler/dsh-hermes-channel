@@ -410,14 +410,19 @@ function registerChannelTools(ctx, agent) {
 
   register({
     name: 'hermes_channel_register',
-    description: 'Register this agent for the Feishu channel with a unique flag. '
-      + 'Returns the flag that the user should prefix replies with (e.g. "$abc123").',
+    description: 'Register this agent for the Feishu channel and lease a unique reply flag. '
+      + 'By default a short memorable WORD is assigned (e.g. "otter", "quartz") because the user '
+      + 'must type "$<flag> " on every Feishu reply — avoid random strings. Pass "flag" to request '
+      + 'a specific name (3-16 lowercase letters/digits, starting with a letter).',
     parameters: schema({
       agent_id: { type: 'string', description: 'Identifier for this agent or request' },
+      flag: { type: 'string', description: 'Preferred memorable flag name, e.g. "otter" (optional; a free word is assigned when omitted or taken)' },
     }, ['agent_id']),
     output: JSON_OUTPUT,
     async execute(args) {
-      return runPipeline('01_register.py', [String(args.agent_id)])
+      const cmdArgs = [String(args.agent_id)]
+      if (typeof args.flag === 'string' && args.flag.length > 0) cmdArgs.push('--flag', String(args.flag))
+      return runPipeline('01_register.py', cmdArgs)
     },
   })
 

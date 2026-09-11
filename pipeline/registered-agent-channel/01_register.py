@@ -49,9 +49,21 @@ def main() -> int:
         gate_fail(STEP, "pool_script_exists", "missing", "exists", f"not found: {pool_script}")
 
     if flag is None:
+        # Lease a memorable word from the pool (e.g. "otter") rather than a
+        # random string: the user types this flag on every Feishu reply.
         import subprocess
         proc = subprocess.run(
-            [sys.executable, str(pool_script), "lease", "--random", "--agent", agent_id],
+            [sys.executable, str(pool_script), "lease", "--agent", agent_id],
+            capture_output=True, text=True, timeout=30,
+        )
+        if proc.returncode != 0:
+            gate_fail(STEP, "lease_flag", proc.returncode, 0, proc.stderr.strip())
+        flag = json.loads(proc.stdout)["flag"]
+    else:
+        # An explicit name was requested: lease exactly that flag.
+        import subprocess
+        proc = subprocess.run(
+            [sys.executable, str(pool_script), "lease", "--agent", agent_id, "--flag", flag],
             capture_output=True, text=True, timeout=30,
         )
         if proc.returncode != 0:
