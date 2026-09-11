@@ -71,6 +71,14 @@ def main() -> int:
         flag = json.loads(proc.stdout)["flag"]
 
     registrations = load_registrations()
+    # One live flag per agent: a rename (or any re-registration) retires the
+    # agent's previous entries so monitor/status never reports a stale flag.
+    retired = []
+    for existing_flag, record in registrations["registrations"].items():
+        if existing_flag != flag and record.get("agent_id") == agent_id and record.get("active"):
+            record["active"] = False
+            record["retired_at"] = time.time()
+            retired.append(existing_flag)
     registrations["registrations"][flag] = {
         "agent_id": agent_id,
         "registered_at": time.time(),
@@ -79,9 +87,14 @@ def main() -> int:
     save_registrations(registrations)
 
     gate_pass(STEP, "lease_flag", flag, "assigned")
-    log_event(STEP, "registered", agent_id=agent_id, flag=flag)
+    log_event(STEP, "registered", agent_id=agent_id, flag=flag, retired=retired)
     step_success(STEP)
-    print(json.dumps({"flag": flag, "agent_id": agent_id, "status": "registered"}, ensure_ascii=False))
+    print(json.dumps({
+        "flag": flag,
+        "agent_id": agent_id,
+        "status": "registered",
+        "retired_flags": retired,
+    }, ensure_ascii=False))
     return 0
 
 

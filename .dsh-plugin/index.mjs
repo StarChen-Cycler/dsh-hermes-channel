@@ -128,20 +128,44 @@ function turnEndCount(agent) {
 
 /** Leaf projection of the newest `turn/end` reason — never the live event object. */
 function lastTurnEnd(agent) {
+  return turnEndAt(agent, -1)
+}
+
+/**
+ * Leaf projection of one `turn/end` reason by position.
+ * `index >= 0` counts from the start (0 = first turn/end); `-1` = newest.
+ * Reading the turn that closed *after* our delivery baseline avoids blaming a
+ * concurrent UI turn's outcome on the delivered batch.
+ */
+function turnEndAt(agent, index) {
   try {
     const events = agent.session.snapshotEvents()
-    for (let i = events.length - 1; i >= 0; i -= 1) {
-      const event = events[i]
-      if (event.type !== 'turn/end') continue
-      const reason = event.data.reason
-      return {
-        kind: typeof reason?.kind === 'string' ? reason.kind : 'unknown',
-        code: typeof reason?.error?.code === 'string' ? reason.error.code : '',
-        message: typeof reason?.error?.message === 'string' ? reason.error.message.slice(0, 200) : '',
+    if (index < 0) {
+      for (let i = events.length - 1; i >= 0; i -= 1) {
+        const event = events[i]
+        if (event.type !== 'turn/end') continue
+        return projectTurnEnd(event)
       }
+      return undefined
+    }
+    let seen = 0
+    for (const event of events) {
+      if (event.type !== 'turn/end') continue
+      if (seen === index) return projectTurnEnd(event)
+      seen += 1
     }
   } catch { /* fall through */ }
   return undefined
+}
+
+/** Scalar-only projection of one turn/end event. */
+function projectTurnEnd(event) {
+  const reason = event.data?.reason
+  return {
+    kind: typeof reason?.kind === 'string' ? reason.kind : 'unknown',
+    code: typeof reason?.error?.code === 'string' ? reason.error.code : '',
+    message: typeof reason?.error?.message === 'string' ? reason.error.message.slice(0, 200) : '',
+  }
 }
 
 /** Whether a failed turn looks like a transient provider problem worth retrying. */
@@ -226,16 +250,28 @@ function startPush(ctx, agent, flag, intervalSeconds) {
         agent.followup(makeUserMessage(text))
       } catch (error) {
         inflight = false
+        // Delivery never started: keep the messages queued, but do not spin —
+        // a followup that throws synchronously is usually a transient state.
+        consecutiveFailures += 1
+        backoffUntil = Date.now() + Math.min(30_000 * consecutiveFailures, 300_000)
         ctx.logger.warn(`hermes-channel: followup failed for $${flag}: ${error instanceof Error ? error.message : String(error)}`)
         return
       }
       ctx.logger.info(`hermes-channel: delivered ${data.messages.length} message(s) to agent ${agent.id}; awaiting turn result`)
-      // Confirm the delivery: ack only after a turn actually closed successfully.
+      // Confirm the delivery: ack only after the turn opened by this delivery closes.
       void (async () => {
         try {
           const settled = await waitForTurnEnd(agent, baseline, 600_000)
-          const end = lastTurnEnd(agent)
-          if (settled && !isRetryableFailure(end)) {
+          // The turn that closed right after the baseline is ours; the newest
+          // turn/end could belong to a concurrent UI turn.
+          const end = settled && baseline >= 0 ? turnEndAt(agent, baseline) : lastTurnEnd(agent)
+          if (baseline >= 0 && ids.length === 0) {
+            // A batch with no usable ids could never be acknowledged — refuse to
+            // claim success, otherwise the same content would be re-delivered forever.
+            consecutiveFailures += 1
+            backoffUntil = Date.now() + Math.min(30_000 * consecutiveFailures, 300_000)
+            ctx.logger.warn(`hermes-channel: batch for $${flag} carried no numeric message ids; leaving it queued`)
+          } else if (settled && !isRetryableFailure(end)) {
             if (ids.length > 0) await runPipeline('06_ack.py', [flag, ...ids.map(String)])
             consecutiveFailures = 0
             backoffUntil = 0
@@ -269,10 +305,6 @@ function startPush(ctx, agent, flag, intervalSeconds) {
  * a stale PID record alone cannot prove the process is gone.
  */
 const listeners = new Map()
-
-function listenerCommand(flag) {
-  return `02_listen.py ${flag}`
-}
 
 /** Scan the OS for `02_listen.py <flag>` processes; newest first. */
 function scanListeners() {
