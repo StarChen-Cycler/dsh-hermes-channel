@@ -177,21 +177,31 @@ Push requires the persistent listener for the same flag
 (`hermes_channel_listen_start`). Check health with `hermes_channel_monitor`;
 if `recommended_action` is `restart_listener`, start the listener again.
 
-### Delivery semantics (at-least-once)
+### Delivery semantics (at-least-once, bounded)
 
-The push loop PEEKS the queue, injects the batch, then waits for the turn to
-close:
+The push loop PEEKS the queue, injects the batch, then waits for the turn that
+its own delivery opened:
 
-- turn completed → the messages are acknowledged (`06_ack.py`) and leave the queue;
-- turn failed with a transient provider error (`RATE_LIMIT`/`TIMEOUT`/`NETWORK`/
-  server error) → nothing is acknowledged; the messages stay queued and are
+- turn completed → messages are acknowledged (`06_ack.py`) and leave the queue;
+- turn failed with a **provider-transient** code — `EMPTY_RESPONSE`,
+  `RATE_LIMIT`, `SERVER`, `TIMEOUT`, `TRANSPORT` (the harness's own llm-retry
+  default set) → nothing is acknowledged; the messages stay queued and are
   re-delivered after an exponential backoff (30s → 5min cap);
-- while the session's last turn is a retryable provider failure, the loop waits
-  instead of delivering, so a rate-limited model cannot swallow user replies.
+- **any other ending is final**: a completed/aborted/interrupted/max-tokens turn,
+  or an error with a code we do not recognise, means the batch WAS delivered and
+  the session already holds it in its transcript — the messages are acknowledged
+  rather than re-injected. (Treating unknown error codes as retryable used to
+  produce an endless redelivery loop.)
+- **Hard cap: 3 deliveries per batch.** If the turns keep failing for a reason
+  re-injection cannot fix, the batch is acknowledged anyway, the user gets a
+  one-time Feishu notice, and the loop stops.
 
-Consequence: you may see the same batch twice after a failed turn — that is the
-intended retry, not a duplicate bug. Manual `hermes_channel_consume` is
-at-most-once by default (`mark_read: true`); pass `mark_read: false` to peek.
+Retries are labelled in the injected header — `[FEISHU CHANNEL MESSAGE BATCH —
+RETRY 2/3 of the SAME batch; do not repeat work already done]` — so a receiving
+agent can see it is the same content and avoid duplicating work.
+
+Manual `hermes_channel_consume` is at-most-once by default (`mark_read: true`);
+pass `mark_read: false` to peek.
 
 ## Notes
 

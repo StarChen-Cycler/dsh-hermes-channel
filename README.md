@@ -95,6 +95,21 @@ listener survives, so re-run `hermes_channel_status` (and `push_start` when
 needed) after every restart. Reply routing is decided by the **flag**, not by
 the chat: several agents may share one Feishu DM while each owns its own flag.
 
+## Delivery semantics
+
+Push delivery is at-least-once but **bounded**:
+
+- a batch is acknowledged only after the turn it opened closes;
+- it is re-injected **only** when that turn failed with a provider-transient code
+  (`EMPTY_RESPONSE`, `RATE_LIMIT`, `SERVER`, `TIMEOUT`, `TRANSPORT` — the same
+  set the harness's own `llm-retry` retries);
+- every other ending (completed, aborted, max-tokens, or an unrecognised error
+  code) is treated as final and the batch is acknowledged — the turn ran, so the
+  session already has the content;
+- **at most 3 deliveries per batch**, then the batch is acknowledged with a
+  one-time Feishu notice so a permanently failing turn cannot spam the user;
+- retries carry `— RETRY n/3 …` in the batch header.
+
 ## Repository layout
 
 ```

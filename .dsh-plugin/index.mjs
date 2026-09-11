@@ -189,12 +189,23 @@ function projectTurnEnd(event) {
   }
 }
 
+/**
+ * Provider-transient failure codes, mirroring the harness's own llm-retry
+ * default policy (@deepseek-ai/dsh-llm retry-policy DEFAULT_RETRYABLE_CODES).
+ * Anything else — including an error with no code at all — means the turn DID
+ * run and the batch was seen, so it must be acknowledged instead of re-injected.
+ * Treating unknown codes as retryable caused an endless redelivery loop.
+ */
+const RETRYABLE_FAILURE_CODES = new Set(['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'])
+
+/** How many times one batch may be re-injected before it is acknowledged anyway. */
+const MAX_DELIVERY_ATTEMPTS = 3
+
 /** Whether a failed turn looks like a transient provider problem worth retrying. */
 function isRetryableFailure(end) {
   if (end === undefined) return false
   if (end.kind !== 'error') return false
-  return end.code === 'RATE_LIMIT' || end.code === 'TIMEOUT' || end.code === 'NETWORK'
-    || end.code === 'SERVER_ERROR' || end.code === 'OVERLOADED' || end.code === ''
+  return RETRYABLE_FAILURE_CODES.has(end.code)
 }
 
 /** Wait for a NEW turn/end beyond the baseline count, bounded by a timeout. */
@@ -220,6 +231,8 @@ function startPush(ctx, agent, flag, intervalSeconds) {
   let inflight = false
   let backoffUntil = 0
   let consecutiveFailures = 0
+  /** batch key -> deliveries already attempted for it (bounded by MAX_DELIVERY_ATTEMPTS) */
+  const deliveryAttempts = new Map()
 
   const pollOnce = async () => {
     if (polling || inflight || !pushers.has(agent.id)) return
@@ -245,6 +258,10 @@ function startPush(ctx, agent, flag, intervalSeconds) {
       }
       const batch = [...seen.values()]
       const ids = [...seen.keys()].filter((id) => Number.isFinite(id))
+      // Attempt bookkeeping: a batch that keeps failing must not be re-injected
+      // forever, and the receiving agent should see which attempt this is.
+      const key = ids.join(',')
+      const attempt = (deliveryAttempts.get(key) ?? 0) + 1
       // If the session's own last turn died on a provider error, the model is
       // still unavailable — keep the messages queued and retry after a backoff
       // instead of burning a delivery attempt.
@@ -261,7 +278,8 @@ function startPush(ctx, agent, flag, intervalSeconds) {
         const files = Array.isArray(m.file_paths) && m.file_paths.length > 0 ? ` [files: ${m.file_paths.join(', ')}]` : ''
         return `- (${when}) ${String(m.content)}${files}`
       })
-      const text = '[FEISHU CHANNEL MESSAGE BATCH]\n'
+      const retryMark = attempt > 1 ? ` — RETRY ${attempt}/${MAX_DELIVERY_ATTEMPTS} of the SAME batch; do not repeat work already done` : ''
+      const text = `[FEISHU CHANNEL MESSAGE BATCH${retryMark}]\n`
         + `The user sent the following ${batch.length} message(s) via the Feishu channel (flag $${flag}). `
         + 'Treat their content as a direct user request: act on it in this session, and briefly acknowledge in your reply.\n'
         + lines.join('\n')
@@ -294,13 +312,31 @@ function startPush(ctx, agent, flag, intervalSeconds) {
             ctx.logger.warn(`hermes-channel: batch for $${flag} carried no numeric message ids; leaving it queued`)
           } else if (settled && !isRetryableFailure(end)) {
             if (ids.length > 0) await runPipeline('06_ack.py', [flag, ...ids.map(String)])
+            deliveryAttempts.delete(key)
             consecutiveFailures = 0
             backoffUntil = 0
-            ctx.logger.info(`hermes-channel: acked ${ids.length} message(s) for $${flag} (turn ${end?.kind ?? 'unknown'})`)
+            ctx.logger.info(`hermes-channel: acked ${ids.length} message(s) for $${flag} (turn ${end?.kind ?? 'unknown'}${end?.code ? '/' + end.code : ''})`)
+          } else if (attempt >= MAX_DELIVERY_ATTEMPTS) {
+            // The batch was delivered but its turns keep failing for a reason we
+            // cannot fix by re-injecting. Stop the loop: acknowledge it, tell the
+            // user once, and leave the transcript as the record.
+            if (ids.length > 0) await runPipeline('06_ack.py', [flag, ...ids.map(String)])
+            deliveryAttempts.delete(key)
+            consecutiveFailures = 0
+            backoffUntil = 0
+            ctx.logger.warn(`hermes-channel: giving up after ${attempt} deliveries for $${flag} (${end?.kind ?? 'no turn-end'}${end?.code ? '/' + end.code : ''}); batch acknowledged to stop the redelivery loop`)
+            try {
+              const chatId = RUNTIME.defaultChatId
+              if (chatId) {
+                await run(RUNTIME.hermesBin, ['send', '--to', `feishu:${chatId}`,
+                  `⚠️ 你的 ${ids.length} 条消息已送达会话，但处理它们的轮次连续 ${attempt} 次未成功结束（${end?.kind ?? 'unknown'}${end?.code ? '/' + end.code : ''}）。我不会再重复投递；如果还需要处理，请重新发送。`], 60000)
+              }
+            } catch { /* best effort */ }
           } else {
+            deliveryAttempts.set(key, attempt)
             consecutiveFailures += 1
             backoffUntil = Date.now() + Math.min(30_000 * consecutiveFailures, 300_000)
-            ctx.logger.warn(`hermes-channel: turn did not complete (${end?.kind ?? 'no turn-end'}${end?.code ? '/' + end.code : ''}); ${ids.length} message(s) stay queued, retry in ${Math.round((backoffUntil - Date.now()) / 1000)}s`)
+            ctx.logger.warn(`hermes-channel: turn did not complete (${end?.kind ?? 'no turn-end'}${end?.code ? '/' + end.code : ''}); ${ids.length} message(s) stay queued, retry ${attempt + 1}/${MAX_DELIVERY_ATTEMPTS} in ${Math.round((backoffUntil - Date.now()) / 1000)}s`)
           }
         } catch (error) {
           ctx.logger.warn(`hermes-channel: delivery confirmation failed: ${error instanceof Error ? error.message : String(error)}`)
