@@ -55,7 +55,8 @@ variable:
 |------|---------|
 | `hermes_channel_send` | Send text/Markdown/file to the user |
 | `hermes_channel_register` | Lease a unique reply flag for this agent |
-| `hermes_channel_listen_start` | Start the detached persistent listener (optional `chat_id` override) |
+| `hermes_channel_listen_start` | Start the listener for a flag — IDEMPOTENT (adopts the running one, kills duplicates); optional `chat_id` |
+| `hermes_channel_listen_stop` | Stop every listener process for a flag |
 | `hermes_channel_consume` | One-shot read of pending replies |
 | `hermes_channel_push_start` / `push_stop` | Real-time push into the session |
 | `hermes_channel_monitor` | Listener health + recommended action |
@@ -85,6 +86,12 @@ scripts/setup.mjs         interactive configuration writer
 ## Notes & limitations
 
 - Queued messages expire after 1 hour.
+- **One listener per flag is a hard invariant.** Duplicate listeners each append
+  the same message to the queue, and the user receives it N times.
+  `hermes_channel_listen_start` is idempotent (scans the host for
+  `02_listen.py <flag>` processes, adopts the newest, kills the rest, spawns
+  only when none exists) and `hermes_channel_listen_stop` clears a flag
+  completely. Delivery additionally dedupes batches by message id.
 - The queue assumes a single consumer per flag (one push loop or manual
   consume); concurrent consumers on the same flag race on mark-read.
 - Listener health files (`logs/02_listen/`) are shared across flags — run one
