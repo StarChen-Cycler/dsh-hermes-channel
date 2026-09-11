@@ -62,15 +62,28 @@ variable:
 | `hermes_channel_monitor` | Listener health + recommended action |
 | `hermes_channel_release` | Return a flag to the pool |
 
+## Flags
+
+A flag is the per-session routing key the user types on every Feishu reply
+(`$<flag> …`), so flags are **memorable words**, never random strings.
+
+- `hermes_channel_register(agent_id: "x")` auto-assigns a word from a curated
+  pool of ~128 short, unambiguous words (`otter`, `quartz`, `topaz`, `heron`).
+- Pass `flag: "otter"` to choose the name yourself (3–16 lowercase
+  letters/digits, starting with a letter). Invalid or in-use names are rejected.
+- Registering again with a different `flag` **renames**: the new name is leased
+  and the previous lease is released automatically. Finish with
+  `listen_start(new)` → `push_start(new)`.
+
 ## Typical flow
 
 ```
-hermes_channel_register(agent_id: "my-agent")      → flag "abc123"
-hermes_channel_listen_start(flag: "abc123")
-hermes_channel_send(message: "…请回复 $abc123 …")
-hermes_channel_push_start(flag: "abc123")          # real-time mode
+hermes_channel_register(agent_id: "my-agent")      → flag "otter"
+hermes_channel_listen_start(flag: "otter")
+hermes_channel_send(message: "…请回复 $otter …")
+hermes_channel_push_start(flag: "otter")           # real-time mode
 # …user replies in Feishu…  →  session wakes with the message
-hermes_channel_release(flag: "abc123")
+hermes_channel_release(flag: "otter")
 ```
 
 ## Repository layout

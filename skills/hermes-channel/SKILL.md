@@ -28,6 +28,25 @@ user gives you a flag that "belongs" to another session, confirm before
 touching it. Release your flag with `hermes_channel_release` when the
 conversation is done.
 
+## Choosing a Flag (make it typeable)
+
+The user types `$<flag> ` on **every** Feishu reply, so a flag must be
+memorable and short — never a random string like `2b12jh`.
+
+- `hermes_channel_register(agent_id: "x")` **assigns a word automatically**
+  (e.g. `otter`, `quartz`, `topaz`) from a curated pool of short, unambiguous
+  English words (animals, gems, trees, landscape, sky, objects).
+- To pick the name yourself, pass `flag`:
+  `hermes_channel_register(agent_id: "x", flag: "otter")`.
+  Rules: 3–16 chars, lowercase letters/digits, must start with a letter;
+  an invalid or already-leased name is rejected with a clear error.
+- **Renaming**: calling register again with a different `flag` leases the new
+  name and automatically releases your previous one. Complete the switch with
+  `listen_start(new)` → `push_start(new)` (push_start replaces the session's
+  previous push loop), then release the old flag if it is still leased.
+- Avoid names that look alike or are easy to mistype (`mu`/`nu`, `oak`/`okay`):
+  prefer distinctive words such as `heron`, `amber`, `comet`.
+
 ## Prerequisites
 
 - The Hermes Gateway must be running (`hermes gateway status`).
@@ -53,7 +72,7 @@ content to be sent as a channel message.
 | Tool | Purpose |
 |------|---------|
 | `hermes_channel_send` | Send text/Markdown/file (`media_path`) to the user |
-| `hermes_channel_register` | Lease a unique flag and register this agent |
+| `hermes_channel_register` | Lease a unique reply flag — auto-assigns a memorable word, or pass `flag: "otter"` to choose; renaming releases the previous flag |
 | `hermes_channel_listen_start` | Start the listener for a flag — IDEMPOTENT: adopts a running listener, kills duplicates, spawns only when none exists (optional `chat_id`) |
 | `hermes_channel_listen_stop` | Stop every listener process for a flag (clears duplicates) |
 | `hermes_channel_consume` | One-shot read of pending replies (poll) |
@@ -66,12 +85,12 @@ content to be sent as a channel message.
 
 ```
 1. hermes_channel_register(agent_id: "<name>")
-   → { flag: "abc123" }
-2. hermes_channel_listen_start(flag)
-3. hermes_channel_send(message: "…请回复 $abc123 <内容>")
-4. hermes_channel_push_start(flag)        ← real-time mode (recommended)
+   → { flag: "otter" }                     ← a memorable word, or pass flag: "otter" yourself
+2. hermes_channel_listen_start(flag)       ← idempotent; safe to call again
+3. hermes_channel_send(message: "…请回复 $otter <内容>")
+4. hermes_channel_push_start(flag)         ← real-time mode (recommended)
    …or poll with hermes_channel_consume(flag)
-5. hermes_channel_release(flag)           ← when done
+5. hermes_channel_release(flag)            ← when done
 ```
 
 ## Push Mode (the reason this plugin exists)
